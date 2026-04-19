@@ -1,0 +1,831 @@
+// SPDX-FileCopyrightText: Copyright 2026 Android Port Contributors
+// SPDX-License-Identifier: Apache-2.0
+//
+// This file is part of the Android port in this repository.
+// Derived from BaiduPCS-Rust v1.12.1 by komorebiCarry and modified
+// for Android integration, mobile UX, and distribution compliance.
+// See the repository LICENSE and NOTICE files for details.
+
+// 二维码登录功能实现
+
+use crate::auth::constants::*;
+use crate::auth::{QRCode, QRCodeStatus, UserAuth};
+use crate::common::ProxyConfig;
+use anyhow::{Context, Result};
+use reqwest::Client;
+use serde_json::Value;
+use tracing::{debug, info, warn};
+
+/// 二维码登录客户端
+pub struct QRCodeAuth {
+    client: Client,
+    baiduid: std::sync::Arc<std::sync::Mutex<Option<String>>>, // 存储从 fetch_qrcode_sign 获取的 BAIDUID
+}
+
+impl QRCodeAuth {
+    /// 创建新的二维码登录客户端
+    pub fn new() -> Result<Self> {
+        Self::new_with_proxy(None)
+    }
+
+    /// 创建新的二维码登录客户端（支持代理配置）
+    pub fn new_with_proxy(proxy_config: Option<&ProxyConfig>) -> Result<Self> {
+        let mut builder = Client::builder()
+            .cookie_store(true)
+            .user_agent(USER_AGENT);
+
+        if let Some(proxy) = proxy_config {
+            builder = proxy.apply_to_builder(builder)?;
+        }
+
+        let client = builder
+            .build()
+            .context("Failed to create HTTP client")?;
+
+        Ok(Self {
+            client,
+            baiduid: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    /// 生成登录二维码
+    ///
+    /// 调用百度API获取二维码sign，并下载百度生成的二维码图片
+    pub async fn generate_qrcode(&self) -> Result<QRCode> {
+        info!("开始生成登录二维码");
+
+        // 步骤1: 获取二维码sign
+        let (sign, _api_url) = self.fetch_qrcode_sign().await?;
+        debug!("获取到二维码 sign: {}", sign);
+
+        // 步骤2: 构建百度二维码图片API的URL
+        // 使用 lp=mobile 让二维码支持APP扫描
+        let qrcode_image_url = format!(
+            "{}?sign={}&lp=mobile&qrloginfrom=mobile&tpl={}",
+            API_QRCODE_IMAGE, sign, APP_TEMPLATE
+        );
+        debug!("二维码图片URL: {}", qrcode_image_url);
+
+        // 步骤3: 下载百度生成的二维码图片并转为base64
+        // 百度返回的PNG图片中已经包含了正确的登录确认页面URL
+        let image_base64 = self.download_qrcode_image(&qrcode_image_url).await?;
+
+        info!("二维码下载成功");
+
+        Ok(QRCode {
+            sign,
+            image_base64,
+            qrcode_url: qrcode_image_url,
+            created_at: chrono::Utc::now().timestamp(),
+        })
+    }
+
+    /// 确认二维码登录，获取真正的BDUSS和用户信息
+    ///
+    /// 参数:
+    /// - v_code: 轮询返回的 v 字段
+    /// - _sign: 二维码的 sign（暂未使用，保留以备将来使用）
+    ///
+    /// 返回: UserAuth (包含完整的用户信息)
+    async fn confirm_qrcode_login(&self, v_code: &str, _sign: &str) -> Result<UserAuth> {
+        info!("调用确认登录接口，v = {}", v_code);
+
+        // 构建确认登录接口URL
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let redirect_url = "https://pan.baidu.com/disk/main";
+
+        let url = format!(
+            "{}?v={}&bduss={}&u={}&tpl={}&qrcode=1&apiver={}&tt={}",
+            API_QRCODE_LOGIN,
+            timestamp,
+            v_code,
+            urlencoding::encode(redirect_url),
+            APP_TEMPLATE,
+            API_VERSION,
+            timestamp
+        );
+
+        debug!("确认登录URL: {}", url);
+
+        // 调用接口
+        let resp = self
+            .client
+            .get(&url)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await
+            .context("Failed to confirm qrcode login")?;
+
+        // 提取 Set-Cookie 中的所有重要 Cookie
+        let mut bduss = String::new();
+        let mut stoken = String::new();
+        let mut ptoken = String::new();
+        let mut baiduid = String::new();
+        let mut sboxtkn = String::new();
+        let mut cookie_pairs = Vec::new(); // 存储 name=value 对
+
+        // 辅助函数: 提取 Cookie 值
+        let extract_cookie_value = |cookie_str: &str, name: &str| -> String {
+            if let Some(start) = cookie_str.find(&format!("{}=", name)) {
+                let value_part = &cookie_str[start + name.len() + 1..];
+                if let Some(end) = value_part.find(';') {
+                    value_part[..end].to_string()
+                } else {
+                    value_part.to_string()
+                }
+            } else {
+                String::new()
+            }
+        };
+
+        // 遍历所有的 Set-Cookie 响应头
+        for cookie_header in resp.headers().get_all("set-cookie") {
+            let cookie_str = cookie_header.to_str().unwrap_or("");
+            debug!("收到 Set-Cookie: {}", Self::redact_cookie_header(cookie_str));
+
+            // 提取 Cookie 的 name=value 部分 (第一个分号之前)
+            if let Some(semicolon_pos) = cookie_str.find(';') {
+                let name_value = &cookie_str[..semicolon_pos];
+                if !name_value.is_empty() {
+                    cookie_pairs.push(name_value.to_string());
+                }
+            } else {
+                cookie_pairs.push(cookie_str.to_string());
+            }
+
+            // 提取 BDUSS
+            if cookie_str.contains("BDUSS=") && bduss.is_empty() {
+                bduss = extract_cookie_value(cookie_str, "BDUSS");
+                if !bduss.is_empty() {
+                    info!("找到 BDUSS Cookie");
+                }
+            }
+
+            // 提取 STOKEN
+            if cookie_str.contains("STOKEN=") && stoken.is_empty() {
+                stoken = extract_cookie_value(cookie_str, "STOKEN");
+                if !stoken.is_empty() {
+                    info!("找到 STOKEN Cookie");
+                }
+            }
+
+            // 提取 PTOKEN
+            if cookie_str.contains("PTOKEN=") && ptoken.is_empty() {
+                ptoken = extract_cookie_value(cookie_str, "PTOKEN");
+                if !ptoken.is_empty() {
+                    info!("找到 PTOKEN Cookie");
+                }
+            }
+
+            // 提取 BAIDUID
+            if cookie_str.contains("BAIDUID=") && baiduid.is_empty() {
+                baiduid = extract_cookie_value(cookie_str, "BAIDUID");
+                if !baiduid.is_empty() {
+                    info!("找到 BAIDUID Cookie");
+                }
+            }
+
+            // 提取 SBOXTKN
+            if cookie_str.contains("SBOXTKN=") && sboxtkn.is_empty() {
+                sboxtkn = extract_cookie_value(cookie_str, "SBOXTKN");
+                if !sboxtkn.is_empty() {
+                    info!("找到 SBOXTKN Cookie");
+                }
+            }
+        }
+
+        if bduss.is_empty() {
+            return Err(anyhow::anyhow!("未能从响应中提取BDUSS"));
+        }
+
+        // 从 fetch_qrcode_sign 中提取的 BAIDUID
+        if baiduid.is_empty() {
+            if let Some(ref saved_baiduid) = *self.baiduid.lock().unwrap() {
+                baiduid = saved_baiduid.clone();
+                info!("使用 fetch_qrcode_sign 中保存的 BAIDUID");
+            }
+        }
+
+        info!("Cookie 提取结果:");
+        info!("  BDUSS: 已获取 (len={})", bduss.len());
+        info!(
+            "  STOKEN: {}",
+            if !stoken.is_empty() {
+                "已获取"
+            } else {
+                "未获取"
+            }
+        );
+        info!(
+            "  PTOKEN: {}",
+            if !ptoken.is_empty() {
+                "已获取"
+            } else {
+                "未获取"
+            }
+        );
+        info!(
+            "  BAIDUID: {}",
+            if !baiduid.is_empty() {
+                "已获取"
+            } else {
+                "未获取"
+            }
+        );
+        info!(
+            "  SBOXTKN: {}",
+            if !sboxtkn.is_empty() {
+                "已获取"
+            } else {
+                "未获取"
+            }
+        );
+
+        // 获取完整的用户信息
+        match self.get_user_info(&bduss).await {
+            Ok(mut user) => {
+                info!("登录成功！用户: {}, UID: {}", user.username, user.uid);
+                // 设置所有提取到的 Cookie
+                user.stoken = if !stoken.is_empty() {
+                    Some(stoken)
+                } else {
+                    None
+                };
+                user.ptoken = if !ptoken.is_empty() {
+                    Some(ptoken)
+                } else {
+                    None
+                };
+                user.baiduid = if !baiduid.is_empty() {
+                    Some(baiduid)
+                } else {
+                    None
+                };
+                user.passid = if let Some(passid_cookie) =
+                    cookie_pairs.iter().find(|c| c.starts_with("PASSID="))
+                {
+                    Some(
+                        passid_cookie
+                            .strip_prefix("PASSID=")
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                user.cookies = if !cookie_pairs.is_empty() {
+                    Some(cookie_pairs.join("; ")) // 用 "; " 连接 name=value 对
+                } else {
+                    None
+                };
+                Ok(user)
+            }
+            Err(e) => {
+                warn!("获取用户信息失败: {}，使用基本信息", e);
+                // 如果获取用户信息失败，返回基本的UserAuth
+                let mut user = UserAuth::new(0, "未知用户".to_string(), bduss);
+                user.stoken = if !stoken.is_empty() {
+                    Some(stoken)
+                } else {
+                    None
+                };
+                user.ptoken = if !ptoken.is_empty() {
+                    Some(ptoken)
+                } else {
+                    None
+                };
+                user.baiduid = if !baiduid.is_empty() {
+                    Some(baiduid)
+                } else {
+                    None
+                };
+                user.passid = if let Some(passid_cookie) =
+                    cookie_pairs.iter().find(|c| c.starts_with("PASSID="))
+                {
+                    Some(
+                        passid_cookie
+                            .strip_prefix("PASSID=")
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                user.cookies = if !cookie_pairs.is_empty() {
+                    Some(cookie_pairs.join("; "))
+                } else {
+                    None
+                };
+                Ok(user)
+            }
+        }
+    }
+
+    /// 从百度API获取二维码sign和imgurl
+    ///
+    /// 返回: (sign, imgurl)
+    async fn fetch_qrcode_sign(&self) -> Result<(String, String)> {
+        let url = format!(
+            "{}?lp={}&qrloginfrom={}&gid=xxx&callback=tangram_guid_xxx&apiver={}&tt=xxx&tpl={}&_=xxx",
+            API_GET_QRCODE, QR_LOGIN_PLATFORM, QR_LOGIN_FROM, API_VERSION, APP_TEMPLATE
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await
+            .context("Failed to fetch qrcode sign")?;
+
+        // 打印响应头,查看是否有 BAIDUID
+        debug!("检查二维码 sign 响应头中的 Cookie");
+        for cookie_header in resp.headers().get_all("set-cookie") {
+            if let Ok(cookie_str) = cookie_header.to_str() {
+                debug!("  Set-Cookie: {}", Self::redact_cookie_header(cookie_str));
+
+                // 提取 BAIDUID
+                if cookie_str.contains("BAIDUID=") {
+                    if let Some(start) = cookie_str.find("BAIDUID=") {
+                        let value_part = &cookie_str[start + 8..]; // "BAIDUID=" 长度为 8
+                        if let Some(end) = value_part.find(';') {
+                            let baiduid_value = value_part[..end].to_string();
+                            info!("提取到 BAIDUID Cookie");
+                            *self.baiduid.lock().unwrap() = Some(baiduid_value);
+                        }
+                    }
+                }
+            }
+        }
+
+        let text = resp.text().await?;
+
+        // 响应格式: tangram_guid_xxx({...})
+        // 提取JSON部分
+        let json_start = text.find('(').context("Invalid response format")?;
+        let json_end = text.rfind(')').context("Invalid response format")?;
+        let json_str = &text[json_start + 1..json_end];
+
+        let json: Value =
+            serde_json::from_str(json_str).context("Failed to parse qrcode response")?;
+
+        // 提取完整的imgurl
+        let imgurl = json["imgurl"]
+            .as_str()
+            .context("Failed to extract imgurl from response")?
+            .to_string();
+
+        // 从imgurl中提取sign
+        let sign = imgurl
+            .split("sign=")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .context("Failed to extract sign from imgurl")?
+            .to_string();
+
+        Ok((sign, imgurl))
+    }
+
+    /// 下载百度生成的二维码图片并转为Base64编码
+    async fn download_qrcode_image(&self, url: &str) -> Result<String> {
+        debug!("下载二维码图片: {}", url);
+
+        // 下载二维码图片
+        let resp = self
+            .client
+            .get(url)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await
+            .context("Failed to download QR code image")?;
+
+        // 获取图片数据
+        let image_bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read QR code image bytes")?;
+
+        // 转换为Base64
+        let base64_image =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_bytes);
+
+        debug!("二维码图片下载完成，大小: {} bytes", image_bytes.len());
+
+        Ok(format!("data:image/png;base64,{}", base64_image))
+    }
+
+    /// 生成二维码图片Base64编码（备用方法，不再使用）
+    #[allow(dead_code)]
+    fn generate_qrcode_image(&self, url: &str) -> Result<String> {
+        use image::Luma;
+        use qrcode::QrCode;
+
+        // 生成二维码
+        let code = QrCode::new(url.as_bytes()).context("Failed to generate QR code")?;
+
+        // 渲染为图片
+        let image = code.render::<Luma<u8>>().min_dimensions(200, 200).build();
+
+        // 转换为PNG并编码为Base64
+        let mut png_data = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_data),
+                image::ImageFormat::Png,
+            )
+            .context("Failed to encode QR code image")?;
+
+        let base64_image =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_data);
+
+        Ok(format!("data:image/png;base64,{}", base64_image))
+    }
+
+    /// 轮询扫码状态
+    ///
+    /// 查询用户是否扫码及登录状态
+    pub async fn poll_status(&self, sign: &str) -> Result<QRCodeStatus> {
+        debug!("轮询二维码状态: {}", sign);
+
+        let url = format!(
+            "{}?channel_id={}&tpl={}&apiver={}&tt={}",
+            API_QRCODE_POLL,
+            sign,
+            APP_TEMPLATE,
+            API_VERSION,
+            chrono::Utc::now().timestamp_millis()
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to poll qrcode status")?;
+
+        // 仅记录是否携带 Cookie，避免把敏感 Cookie 写入日志。
+        if let Some(cookies) = resp.headers().get("set-cookie") {
+            debug!("扫码状态响应包含 Set-Cookie: {}", !cookies.is_empty());
+        }
+
+        let json: Value = resp
+            .json()
+            .await
+            .context("Failed to parse status response")?;
+
+        let robust_channel_v = Self::parse_qrcode_channel_payload(&json);
+        let status = Self::extract_qrcode_status_code(&robust_channel_v, &json);
+        let v_code = Self::extract_qrcode_v_code(&robust_channel_v, &json);
+        let errno = json["errno"].as_i64().unwrap_or(0);
+        debug!(
+            "二维码轮询摘要: errno={}, status={}, has_v={}, channel_v={}",
+            errno,
+            status,
+            !v_code.is_empty(),
+            serde_json::to_string(&robust_channel_v).unwrap_or_default()
+        );
+
+        // 判断登录状态的正确逻辑：
+        // 1. status = 0 且没有 v 字段 → 等待扫码
+        // 2. status = 1 → 已扫码，等待确认
+        // 3. status = 0 且有 v 字段 → 登录成功（需要用 v 去获取 BDUSS）
+
+        if !v_code.is_empty() {
+            // 有 v 字段，说明用户已确认登录
+            info!("用户确认登录成功，v = {}", v_code);
+
+            // 调用确认登录接口，获取真正的 BDUSS 和用户信息
+            match self.confirm_qrcode_login(&v_code, sign).await {
+                Ok(user) => {
+                    info!("登录成功！用户: {}, UID: {}", user.username, user.uid);
+                    Ok(QRCodeStatus::Success {
+                        token: user.bduss.clone(),
+                        user,
+                    })
+                }
+                Err(e) => {
+                    warn!("确认登录失败: {}", e);
+                    // 降级：返回临时用户
+                    Ok(QRCodeStatus::Success {
+                        user: UserAuth::new(0, "临时用户".to_string(), v_code.clone()),
+                        token: v_code,
+                    })
+                }
+            }
+        } else {
+            // 没有 v 字段，根据 status 判断状态
+            match status {
+                0 => {
+                    // 等待扫码
+                    debug!("等待用户扫码");
+                    Ok(QRCodeStatus::Waiting)
+                }
+                1 => {
+                    // 已扫码，待确认
+                    info!("用户已扫码，等待确认");
+                    Ok(QRCodeStatus::Scanned)
+                }
+                2 => {
+                    // 这个状态可能不会出现，但保留判断
+                    info!("登录成功（status=2）");
+                    Ok(QRCodeStatus::Success {
+                        user: UserAuth::new(0, "临时用户".to_string(), "".to_string()),
+                        token: "temp_token".to_string(),
+                    })
+                }
+                -1 | -2 => {
+                    // 二维码过期
+                    warn!("二维码已过期");
+                    Ok(QRCodeStatus::Expired)
+                }
+                _ => {
+                    // 其他状态或错误
+                    warn!("未知的扫码状态: status = {}", status);
+                    // 检查是否有错误信息
+                    if errno != 0 {
+                        let msg = json["msg"].as_str().unwrap_or("未知错误").to_string();
+                        warn!("登录失败: {}", msg);
+                        Ok(QRCodeStatus::Failed { reason: msg })
+                    } else {
+                        // 继续等待
+                        Ok(QRCodeStatus::Waiting)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 解析二维码轮询接口中的 channel_v 负载。
+    ///
+    /// 百度可能返回 JSON 字符串或对象；状态字段也可能是数字或字符串。
+    fn parse_qrcode_channel_payload(json: &Value) -> Value {
+        match json.get("channel_v") {
+            Some(Value::String(raw)) if !raw.trim().is_empty() => {
+                serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({}))
+            }
+            Some(Value::Object(_)) => json["channel_v"].clone(),
+            _ => serde_json::json!({}),
+        }
+    }
+
+    fn extract_qrcode_status_code(channel_v: &Value, root: &Value) -> i64 {
+        Self::read_i64(channel_v.get("status"))
+            .or_else(|| Self::read_i64(root.get("status")))
+            .unwrap_or(0)
+    }
+
+    fn extract_qrcode_v_code(channel_v: &Value, root: &Value) -> String {
+        Self::read_non_empty_string(channel_v.get("v"))
+            .or_else(|| Self::read_non_empty_string(root.get("v")))
+            .unwrap_or_default()
+    }
+
+    fn read_i64(value: Option<&Value>) -> Option<i64> {
+        match value {
+            Some(Value::Number(number)) => number.as_i64(),
+            Some(Value::String(text)) => text.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn read_non_empty_string(value: Option<&Value>) -> Option<String> {
+        match value {
+            Some(Value::String(text)) if !text.trim().is_empty() => Some(text.trim().to_string()),
+            _ => None,
+        }
+    }
+
+    fn redact_cookie_header(cookie_str: &str) -> String {
+        let name = cookie_str
+            .split_once('=')
+            .map(|(name, _)| name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown");
+        format!("{name}=<redacted>")
+    }
+
+    /// 验证BDUSS是否有效
+    ///
+    /// 通过调用网盘用户信息接口来验证BDUSS
+    /// 如果返回成功，说明BDUSS有效
+    /// 如果返回错误，说明BDUSS已失效
+    pub async fn verify_bduss(&self, bduss: &str) -> Result<bool> {
+        info!("验证BDUSS是否有效");
+
+        // 尝试获取用户信息
+        match self.get_user_info(bduss).await {
+            Ok(user) => {
+                info!("BDUSS有效，用户: {}, UID: {}", user.username, user.uid);
+                Ok(true)
+            }
+            Err(e) => {
+                // 区分网络/代理错误与真正的 BDUSS 失效
+                // 网络错误应传播为 Err，避免调用方误删 session
+                if Self::is_network_error(&e) {
+                    warn!("BDUSS验证遇到网络错误（可能是代理故障）: {}", e);
+                    Err(e)
+                } else {
+                    warn!("BDUSS已失效: {}", e);
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// 判断 anyhow 错误链中是否包含网络/连接层错误
+    fn is_network_error(err: &anyhow::Error) -> bool {
+        for cause in err.chain() {
+            if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
+                if re.is_connect() || re.is_timeout() || re.is_request() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 通过百度网盘API获取用户信息
+    ///
+    /// 返回: UserAuth (包含完整的用户信息)
+    async fn get_user_info(&self, bduss: &str) -> Result<UserAuth> {
+        info!("获取用户信息");
+
+        // 使用百度网盘的用户信息接口
+        let url = format!(
+            "{}?method=query&clienttype={}&app_id={}&web=1",
+            API_USER_INFO, CLIENT_TYPE, BAIDU_APP_ID
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("Cookie", format!("{}={}", COOKIE_BDUSS, bduss))
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await
+            .context("Failed to fetch user info")?;
+
+        let json: Value = resp.json().await.context("Failed to parse user info")?;
+
+        // 打印返回的JSON，用于调试
+        info!(
+            "网盘API返回: {}",
+            serde_json::to_string_pretty(&json).unwrap_or_default()
+        );
+
+        // 用户信息在 user_info 字段下
+        let user_info = &json["user_info"];
+
+        // 从返回的JSON中提取用户信息
+        let username = user_info["username"]
+            .as_str()
+            .or_else(|| user_info["baidu_name"].as_str())
+            .or_else(|| user_info["netdisk_name"].as_str())
+            .unwrap_or("未知用户")
+            .to_string();
+
+        let nickname = user_info["username"].as_str().map(|s| s.to_string());
+
+        let uid = user_info["uk"]
+            .as_u64()
+            .or_else(|| user_info["user_id"].as_u64())
+            .unwrap_or(0);
+
+        // 提取头像URL
+        let avatar_url = user_info["photo"]
+            .as_str()
+            .or_else(|| user_info["avatar_url"].as_str())
+            .map(|s| s.to_string());
+
+        // 提取VIP类型（0=普通，1=会员，2=超级会员）
+        let vip_type = if user_info["is_svip"].as_i64().unwrap_or(0) == 1 {
+            Some(2)
+        } else if user_info["is_vip"].as_i64().unwrap_or(0) == 1 {
+            Some(1)
+        } else {
+            Some(0)
+        };
+
+        // 提取空间信息（优先从当前API获取）
+        // 注意：/api/quota 需要 PANPSC 等预热后的 Cookie，登录时无法获取
+        // 空间信息会在预热后由 NetDiskClient 获取
+        let total_space = json["total"].as_u64();
+        let used_space = json["used"].as_u64();
+
+        info!(
+            "获取到用户信息 - 用户名: {}, 昵称: {:?}, UID: {}, VIP: {:?}",
+            username, nickname, uid, vip_type
+        );
+
+        Ok(UserAuth::new_with_details(
+            uid,
+            username,
+            bduss.to_string(),
+            nickname,
+            avatar_url,
+            vip_type,
+            total_space,
+            used_space,
+        ))
+    }
+
+    /// 获取用户UID
+    pub async fn get_uid(&self, bduss: &str) -> Result<u64> {
+        let user = self.get_user_info(bduss).await?;
+        Ok(user.uid)
+    }
+
+    /// 获取用户名
+    pub async fn get_username(&self, bduss: &str) -> Result<String> {
+        let user = self.get_user_info(bduss).await?;
+        Ok(user.username)
+    }
+}
+
+impl Default for QRCodeAuth {
+    fn default() -> Self {
+        Self::new().expect("Failed to create QRCodeAuth")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn test_generate_qrcode() {
+        let auth = QRCodeAuth::new().unwrap();
+        let result = auth.generate_qrcode().await;
+
+        // 注意：此测试需要网络连接
+        if let Ok(qrcode) = result {
+            assert!(!qrcode.sign.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_parse_waiting_qrcode_status() {
+        let root = json!({
+            "errno": 0,
+            "channel_v": "{\"status\":0}"
+        });
+        let channel_v = QRCodeAuth::parse_qrcode_channel_payload(&root);
+
+        assert_eq!(QRCodeAuth::extract_qrcode_status_code(&channel_v, &root), 0);
+        assert_eq!(QRCodeAuth::extract_qrcode_v_code(&channel_v, &root), "");
+    }
+
+    #[test]
+    fn test_parse_scanned_qrcode_status_number() {
+        let root = json!({
+            "errno": 0,
+            "channel_v": "{\"status\":1}"
+        });
+        let channel_v = QRCodeAuth::parse_qrcode_channel_payload(&root);
+
+        assert_eq!(QRCodeAuth::extract_qrcode_status_code(&channel_v, &root), 1);
+    }
+
+    #[test]
+    fn test_parse_scanned_qrcode_status_string() {
+        let root = json!({
+            "errno": 0,
+            "channel_v": "{\"status\":\"1\"}"
+        });
+        let channel_v = QRCodeAuth::parse_qrcode_channel_payload(&root);
+
+        assert_eq!(QRCodeAuth::extract_qrcode_status_code(&channel_v, &root), 1);
+    }
+
+    #[test]
+    fn test_parse_confirm_code_from_channel_or_root() {
+        let channel_root = json!({
+            "channel_v": "{\"status\":0,\"v\":\"channel-confirm-code\"}"
+        });
+        let channel_v = QRCodeAuth::parse_qrcode_channel_payload(&channel_root);
+
+        assert_eq!(
+            QRCodeAuth::extract_qrcode_v_code(&channel_v, &channel_root),
+            "channel-confirm-code"
+        );
+
+        let root = json!({
+            "channel_v": "{\"status\":0}",
+            "v": "root-confirm-code"
+        });
+        let channel_v = QRCodeAuth::parse_qrcode_channel_payload(&root);
+
+        assert_eq!(QRCodeAuth::extract_qrcode_v_code(&channel_v, &root), "root-confirm-code");
+    }
+
+    #[test]
+    fn test_parse_expired_qrcode_status() {
+        let root = json!({
+            "channel_v": "{\"status\":\"-1\"}"
+        });
+        let channel_v = QRCodeAuth::parse_qrcode_channel_payload(&root);
+
+        assert_eq!(QRCodeAuth::extract_qrcode_status_code(&channel_v, &root), -1);
+    }
+}

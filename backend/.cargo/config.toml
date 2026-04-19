@@ -1,0 +1,4 @@
+[build]
+rustc-wrapper = "tools/rustc-host-wrapper.cmd"
+
+# Set CARGO_TARGET_DIR externally when a custom build output directory is needed.

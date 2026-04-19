@@ -1,0 +1,207 @@
+name: Release Decrypt CLI
+
+on:
+  push:
+    tags:
+      - 'decrypt-cli-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows amd64
+          - platform: windows-amd64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: decrypt-cli.exe
+            artifact: decrypt-cli-windows-amd64.exe
+          # Linux amd64
+          - platform: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: decrypt-cli
+            artifact: decrypt-cli-linux-amd64
+          # Linux arm64
+          - platform: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary: decrypt-cli
+            artifact: decrypt-cli-linux-arm64
+            use_zigbuild: true
+          # macOS amd64
+          - platform: macos-amd64
+            os: macos-15
+            target: x86_64-apple-darwin
+            binary: decrypt-cli
+            artifact: decrypt-cli-macos-amd64
+          # macOS arm64
+          - platform: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary: decrypt-cli
+            artifact: decrypt-cli-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild == true
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+          command -v cargo-zigbuild || which cargo-zigbuild || echo "cargo-zigbuild installed"
+
+      - name: Build decrypt-cli
+        shell: bash
+        run: |
+          set -e
+          cd decrypt-cli
+          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+            echo "Building with cargo-zigbuild for ${{ matrix.target }}..."
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            echo "Building with cargo for ${{ matrix.target }}..."
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -e
+          mkdir -p artifacts
+          BIN_PATH="decrypt-cli/target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          cp "$BIN_PATH" "artifacts/${{ matrix.artifact }}"
+          chmod +x "artifacts/${{ matrix.artifact }}" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/${{ matrix.artifact }}
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Prepare release files
+        run: |
+          set -e
+          mkdir -p release
+          
+          # Move all binaries to release directory
+          for dir in artifacts/*/; do
+            if [ -d "$dir" ]; then
+              cp "$dir"* release/ || true
+            fi
+          done
+          
+          # List files for debugging
+          echo "Release files:"
+          ls -la release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
+          echo "SHA256SUMS content:"
+          cat SHA256SUMS
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=decrypt-cli-${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Decrypt CLI ${{ steps.version.outputs.tag }}
+          body: |
+            ## Decrypt CLI Release
+            
+            独立的命令行解密工具，用于解密 BaiduPCS-Rust 加密的文件。
+            
+            ### 下载说明
+            
+            | 平台 | 文件名 |
+            |------|--------|
+            | Windows (64-bit) | `decrypt-cli-windows-amd64.exe` |
+            | Linux (64-bit) | `decrypt-cli-linux-amd64` |
+            | Linux (ARM64) | `decrypt-cli-linux-arm64` |
+            | macOS (Intel) | `decrypt-cli-macos-amd64` |
+            | macOS (Apple Silicon) | `decrypt-cli-macos-arm64` |
+            
+            ### 校验文件
+            
+            使用 `SHA256SUMS` 文件验证下载的完整性：
+            
+            ```bash
+            # Linux/macOS
+            sha256sum -c SHA256SUMS
+            
+            # Windows (PowerShell)
+            Get-FileHash decrypt-cli-windows-amd64.exe -Algorithm SHA256
+            ```
+            
+            ### 使用方法
+
+            ```bash
+            # 批量解密（恢复原始目录结构）
+            decrypt-cli decrypt --key-file encryption.json --map mapping.json --in-dir ./encrypted --out-dir ./decrypted
+
+            # 批量解密（镜像输入目录结构）
+            decrypt-cli decrypt --key-file encryption.json --map mapping.json --in-dir ./encrypted --out-dir ./decrypted --mirror
+
+            # 单文件解密
+            decrypt-cli decrypt --key-file encryption.json --in file.dat --out file.txt
+            ```
+            
+            详细使用说明请参阅 `decrypt-cli --help`
+          files: |
+            release/*
+          generate_release_notes: false
+          make_latest: false
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

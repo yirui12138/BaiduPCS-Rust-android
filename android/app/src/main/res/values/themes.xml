@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.BaiduPCSAndroid" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <style name="Theme.BaiduPCSAndroid.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#08131A</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_startup_mark</item>
+        <item name="postSplashScreenTheme">@style/Theme.BaiduPCSAndroid</item>
+    </style>
+</resources>

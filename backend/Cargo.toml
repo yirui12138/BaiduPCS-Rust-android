@@ -1,0 +1,80 @@
+[package]
+name = "baidu-netdisk-rust"
+version = "1.12.1"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-tungstenite = "0.21"
+
+reqwest = { version = "0.11", default-features = false, features = ["json", "cookies", "stream", "rustls-tls", "multipart", "socks"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+sha1 = "0.10"
+sha2 = "0.10"
+md5 = "0.7"
+hex = "0.4"
+base64 = "0.21"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+argon2 = "0.5"
+
+jsonwebtoken = "9.3"
+
+notify = "6.0"
+walkdir = "2.4"
+
+rusqlite = { version = "0.31", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+tracing-appender = "0.2"
+
+anyhow = "1.0"
+thiserror = "1.0"
+
+chrono = { version = "0.4", features = ["serde"] }
+
+qrcode = "0.13"
+image = "0.24"
+totp-rs = { version = "5.5", features = ["qr", "gen_secret"] }
+
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+toml = "0.8"
+
+futures = "0.3"
+async-trait = "0.1"
+async-recursion = "1.0"
+dashmap = "5.5"
+
+bit-set = "0.5"
+parking_lot = "0.12"
+
+urlencoding = "2.1"
+regex = "1.12.2"
+
+sysinfo = "0.30"
+
+zip = "0.6"
+dunce = "1.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[dev-dependencies]
+tempfile = "3.8"
+proptest = "1.4"

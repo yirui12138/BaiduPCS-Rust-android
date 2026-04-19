@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: baidu-netdisk-backend-dev
+    ports:
+      - "8080:8080"
+    volumes:
+      # 配置文件挂载
+      - ./config:/app/config
+      # 下载目录挂载
+      - ./downloads:/app/downloads
+      # 会话数据挂载
+      - ./data:/app/data
+      # 日志目录挂载（新增）
+      - ./logs:/app/logs
+      # WAL 目录挂载（新增）
+      - ./wal:/app/wal
+      - backend-cargo-cache:/usr/local/cargo/registry
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+    command: cargo watch -x run
+    networks:
+      - baidu-network-dev
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: baidu-netdisk-frontend-dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    command: npm run dev -- --host 0.0.0.0
+    networks:
+      - baidu-network-dev
+
+networks:
+  baidu-network-dev:
+    driver: bridge
+
+volumes:
+  backend-cargo-cache:
+

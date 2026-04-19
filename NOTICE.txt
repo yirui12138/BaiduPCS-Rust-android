@@ -1,0 +1,19 @@
+柏渡云盘 Android 移植版 NOTICE
+
+本应用基于开源项目 BaiduPCS-Rust v1.12.1 进行 Android 本地化移植与系统集成。
+
+上游项目名称: BaiduPCS-Rust
+上游项目作者: komorebiCarry
+上游项目地址: https://github.com/komorebiCarry/BaiduPCS-Rust
+上游引用版本: https://github.com/komorebiCarry/BaiduPCS-Rust/releases/tag/v1.12.1
+
+本移植版包含以下类型的修改:
+- Android 原生壳层与本地运行时集成
+- 移动端 UI 与交互适配
+- 上传/导入流程适配
+- 下载目录与系统能力桥接
+- 开源许可与第三方依赖清单展示
+
+本应用为独立 Android 移植版，非上游官方发布，也非相关品牌官方客户端。
+
+与上游项目直接相关的版权、归属与许可条款，仍以上游仓库中的 Apache License 2.0 许可证文件及相关声明为准。

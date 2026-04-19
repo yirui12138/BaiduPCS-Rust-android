@@ -1,0 +1,2 @@
+-keep class com.baidupcs.android.core.NativeBridge { *; }
+-keepattributes *Annotation*

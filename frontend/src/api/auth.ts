@@ -1,0 +1,135 @@
+// SPDX-FileCopyrightText: Copyright 2026 Android Port Contributors
+// SPDX-License-Identifier: Apache-2.0
+//
+// This file is part of the Android port in this repository.
+// Derived from BaiduPCS-Rust v1.12.1 by komorebiCarry and modified
+// for Android integration, mobile UX, and distribution compliance.
+// See the repository LICENSE and NOTICE files for details.
+
+// 认证API封装
+
+import axios from 'axios'
+
+// 本地存储键名（与 webAuth store 保持一致）
+const WEB_AUTH_ACCESS_TOKEN_KEY = 'web_auth_access_token'
+
+const apiClient = axios.create({
+  baseURL: '/api/v1',
+  timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+})
+
+// 添加 Web 认证拦截器
+apiClient.interceptors.request.use(
+    (config) => {
+      const token = localStorage.getItem(WEB_AUTH_ACCESS_TOKEN_KEY)
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      }
+      return config
+    },
+    (error) => Promise.reject(error)
+)
+
+// 响应拦截器
+apiClient.interceptors.response.use(
+    response => response.data,
+    error => {
+      console.error('API Error:', error)
+      return Promise.reject(error)
+    }
+)
+
+export interface ApiResponse<T> {
+  code: number
+  message: string
+  data?: T
+}
+
+export interface QRCode {
+  sign: string
+  image_base64: string
+  qrcode_url: string
+  created_at: number
+}
+
+export interface UserAuth {
+  uid: number
+  username: string
+  nickname?: string
+  avatar_url?: string
+  vip_type?: number
+  total_space?: number
+  used_space?: number
+  bduss: string
+  stoken?: string
+  ptoken?: string
+  cookies?: string
+  login_time: number
+}
+
+export interface QRCodeStatus {
+  status: 'waiting' | 'scanned' | 'success' | 'expired' | 'failed'
+  user?: UserAuth
+  token?: string
+  reason?: string
+}
+
+/**
+ * 生成登录二维码
+ */
+export async function generateQRCode(): Promise<QRCode> {
+  const response = (await apiClient.post('/auth/qrcode/generate')) as ApiResponse<QRCode>
+  if (response.code !== 0 || !response.data) {
+    throw new Error(response.message || '生成二维码失败')
+  }
+  return response.data
+}
+
+/**
+ * 查询扫码状态
+ */
+export async function getQRCodeStatus(sign: string): Promise<QRCodeStatus> {
+  const response = (await apiClient.get(`/auth/qrcode/status?sign=${sign}`)) as ApiResponse<QRCodeStatus>
+  if (response.code !== 0 || !response.data) {
+    throw new Error(response.message || '查询状态失败')
+  }
+  return response.data
+}
+
+/**
+ * 获取当前用户信息
+ */
+export async function getCurrentUser(): Promise<UserAuth> {
+  const response = (await apiClient.get('/auth/user')) as ApiResponse<UserAuth>
+  if (response.code === 0 && response.data) {
+    return response.data
+  }
+  // 如果没有数据或者返回错误码，抛出异常
+  throw new Error(response.message || '获取用户信息失败')
+}
+
+export interface CookieLoginResult {
+  user: UserAuth
+  message: string
+}
+
+/**
+ * Cookie 登录
+ */
+export async function cookieLogin(cookies: string): Promise<CookieLoginResult> {
+  const response = (await apiClient.post('/auth/cookie/login', { cookies })) as ApiResponse<UserAuth>
+  if (response.code !== 0 || !response.data) {
+    throw new Error(response.message || 'Cookie 登录失败')
+  }
+  return { user: response.data, message: response.message }
+}
+
+/**
+ * 登出
+ */
+export async function logout(): Promise<void> {
+  await apiClient.post('/auth/logout')
+}
