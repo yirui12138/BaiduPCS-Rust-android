@@ -75,6 +75,14 @@ export interface CreateFolderData {
   isdir: number
 }
 
+export interface DeleteFilesData {
+  success: boolean
+  deleted_count: number
+  failed_paths: string[]
+  error?: string
+  errno?: number
+}
+
 /**
  * 获取文件列表
  */
@@ -126,5 +134,19 @@ export async function createFolder(path: string): Promise<CreateFolderData> {
 
 // 重新导出共享工具函数，保持向后兼容
 export const formatFileSize = sharedFormatFileSize
-export const formatTime = formatTimestamp
+/**
+ * 删除云盘文件或文件夹
+ */
+export async function deleteFiles(paths: string[]): Promise<DeleteFilesData> {
+  const response = await apiClient.post<ApiResponse<DeleteFilesData>>('/files/delete', {
+    paths
+  })
 
+  if (response.data.code !== 0 || !response.data.data) {
+    throw new Error(response.data.message || '删除文件失败')
+  }
+
+  return response.data.data
+}
+
+export const formatTime = formatTimestamp

@@ -349,6 +349,54 @@ pub struct CreateFolderData {
 
 /// 创建文件夹
 ///
+#[derive(Debug, Deserialize)]
+pub struct DeleteFilesRequest {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteFilesData {
+    pub success: bool,
+    pub deleted_count: usize,
+    pub failed_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errno: Option<i32>,
+}
+
+impl From<crate::netdisk::DeleteFilesResponse> for DeleteFilesData {
+    fn from(response: crate::netdisk::DeleteFilesResponse) -> Self {
+        Self {
+            success: response.success,
+            deleted_count: response.deleted_count,
+            failed_paths: response.failed_paths,
+            error: response.error,
+            errno: response.errno,
+        }
+    }
+}
+
+fn validate_delete_paths(paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("请选择要删除的文件或文件夹".to_string());
+    }
+
+    for path in paths {
+        if path.trim().is_empty() {
+            return Err("删除路径不能为空".to_string());
+        }
+        if path == "/" {
+            return Err("禁止删除网盘根目录".to_string());
+        }
+        if !path.starts_with('/') {
+            return Err(format!("删除路径必须以 / 开头: {}", path));
+        }
+    }
+
+    Ok(())
+}
+
 /// POST /api/v1/files/folder
 /// Body: { "path": "/apps/test/新建文件夹" }
 pub async fn create_folder(
@@ -437,5 +485,79 @@ pub async fn create_folder(
                 format!("创建文件夹失败: {}", e),
             )))
         }
+    }
+}
+
+/// 删除云盘文件或文件夹
+///
+/// POST /api/v1/files/delete
+/// Body: { "paths": ["/apps/test/file.txt"] }
+pub async fn delete_files(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteFilesRequest>,
+) -> Result<Json<ApiResponse<DeleteFilesData>>, StatusCode> {
+    info!("API: 删除云盘文件/文件夹 count={}", request.paths.len());
+
+    if let Err(message) = validate_delete_paths(&request.paths) {
+        return Ok(Json(ApiResponse::error(400, message)));
+    }
+
+    let client_lock = state.netdisk_client.read().await;
+    let client = match client_lock.as_ref() {
+        Some(c) => c,
+        None => {
+            return Ok(Json(ApiResponse::error(
+                401,
+                "未登录或客户端未初始化".to_string(),
+            )));
+        }
+    };
+
+    match client.delete_files(&request.paths).await {
+        Ok(response) => {
+            let data = DeleteFilesData::from(response);
+            if data.success {
+                info!("删除云盘文件/文件夹成功: deleted_count={}", data.deleted_count);
+            } else {
+                warn!(
+                    "删除云盘文件/文件夹未完全成功: deleted_count={}, errno={:?}, error={:?}",
+                    data.deleted_count, data.errno, data.error
+                );
+            }
+            Ok(Json(ApiResponse::success(data)))
+        }
+        Err(e) => {
+            error!("删除云盘文件/文件夹失败: {}", e);
+            Ok(Json(ApiResponse::error(
+                500,
+                format!("删除云盘文件/文件夹失败: {}", e),
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod delete_path_tests {
+    use super::validate_delete_paths;
+
+    #[test]
+    fn rejects_empty_delete_paths() {
+        assert!(validate_delete_paths(&[]).is_err());
+    }
+
+    #[test]
+    fn rejects_root_delete_path() {
+        assert!(validate_delete_paths(&["/".to_string()]).is_err());
+    }
+
+    #[test]
+    fn rejects_relative_delete_path() {
+        assert!(validate_delete_paths(&["relative/file.txt".to_string()]).is_err());
+    }
+
+    #[test]
+    fn accepts_absolute_delete_paths() {
+        let paths = vec!["/folder/file.txt".to_string(), "/folder/sub".to_string()];
+        assert!(validate_delete_paths(&paths).is_ok());
     }
 }

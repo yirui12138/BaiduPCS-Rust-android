@@ -47,6 +47,15 @@ See the repository LICENSE and NOTICE files for details.
           <el-icon><Link /></el-icon>
           分享 ({{ selectedFiles.length }})
         </el-button>
+        <el-button
+            v-if="selectedFiles.length > 0"
+            type="danger"
+            :loading="batchDeleting"
+            @click="handleBatchDelete"
+        >
+          <el-icon><Delete /></el-icon>
+          删除 ({{ selectedFiles.length }})
+        </el-button>
         <el-button type="primary" @click="showCreateFolderDialog">
           <el-icon><FolderAdd /></el-icon>
           新建文件夹
@@ -165,7 +174,7 @@ See the repository LICENSE and NOTICE files for details.
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <!-- 分享按钮 -->
             <el-button
@@ -193,6 +202,14 @@ See the repository LICENSE and NOTICE files for details.
                 @click.stop="handleDownloadFolder(row)"
             >
               下载
+            </el-button>
+            <el-button
+                type="danger"
+                size="small"
+                :loading="deletingPaths.has(row.path)"
+                @click.stop="handleDeleteSingle(row)"
+            >
+              删除
             </el-button>
           </template>
         </el-table-column>
@@ -244,6 +261,15 @@ See the repository LICENSE and NOTICE files for details.
                 @click.stop="item.isdir === 1 ? handleDownloadFolder(item) : handleDownload(item)"
             >
               <el-icon><Download /></el-icon>
+            </el-button>
+            <el-button
+                type="danger"
+                size="small"
+                circle
+                :loading="deletingPaths.has(item.path)"
+                @click.stop="handleDeleteSingle(item)"
+            >
+              <el-icon><Delete /></el-icon>
             </el-button>
           </div>
         </div>
@@ -334,8 +360,8 @@ See the repository LICENSE and NOTICE files for details.
 
 <script setup lang="ts">
 import {ref, onMounted, computed} from 'vue'
-import {ElMessage} from 'element-plus'
-import {getFileList, formatFileSize, formatTime, createFolder, type FileItem} from '@/api/file'
+import {ElMessage, ElMessageBox} from 'element-plus'
+import {getFileList, formatFileSize, formatTime, createFolder, deleteFiles, type FileItem} from '@/api/file'
 import {useIsMobile} from '@/utils/responsive'
 import {createDownload, createFolderDownload, createBatchDownload, type BatchDownloadItem, type DownloadConflictStrategy} from '@/api/download'
 import {getConfig, updateRecentDirDebounced, setDefaultDownloadDir, type DownloadConfig} from '@/api/config'
@@ -360,6 +386,7 @@ const currentPage = ref(1)
 const hasMore = ref(true)
 const fileListRef = ref<HTMLElement | null>(null)
 const downloadingFolders = ref<Set<string>>(new Set())
+const deletingPaths = ref<Set<string>>(new Set())
 const createFolderDialogVisible = ref(false)
 const creatingFolder = ref(false)
 const createFolderForm = ref({
@@ -370,6 +397,7 @@ const createFolderForm = ref({
 const selectedFiles = ref<FileItem[]>([])
 const showDownloadPicker = ref(false)
 const batchDownloading = ref(false)
+const batchDeleting = ref(false)
 
 // 单文件下载（支持 ask_each_time）
 const pendingDownloadFile = ref<FileItem | null>(null)
@@ -514,6 +542,94 @@ function getDisplayName(file: FileItem): string {
     return file.original_name
   }
   return file.server_filename
+}
+
+function buildDeleteConfirmMessage(files: FileItem[]): string {
+  const preview = files.slice(0, 3).map(getDisplayName).join('、')
+  const remaining = files.length > 3 ? ` 等 ${files.length} 项` : ''
+  const folderWarning = files.some(file => file.isdir === 1)
+      ? '\n\n包含文件夹：文件夹内内容也会被删除/移入网盘回收站，具体以百度网盘机制为准。'
+      : ''
+
+  if (files.length === 1) {
+    const file = files[0]
+    const typeText = file.isdir === 1 ? '文件夹' : '文件'
+    return `即将删除${typeText}：${getDisplayName(file)}${folderWarning}\n\n请输入“删除”确认操作。`
+  }
+
+  return `即将删除 ${files.length} 项：${preview}${remaining}${folderWarning}\n\n请输入“删除”确认操作。`
+}
+
+async function confirmDeleteFiles(files: FileItem[]) {
+  await ElMessageBox.prompt(buildDeleteConfirmMessage(files), '删除确认', {
+    confirmButtonText: '确认删除',
+    cancelButtonText: '取消',
+    type: 'warning',
+    inputPlaceholder: '请输入 删除',
+    inputPattern: /^删除$/,
+    inputErrorMessage: '请输入“删除”确认',
+  })
+}
+
+function markDeleting(paths: string[]) {
+  deletingPaths.value = new Set([...deletingPaths.value, ...paths])
+}
+
+function unmarkDeleting(paths: string[]) {
+  const next = new Set(deletingPaths.value)
+  paths.forEach(path => next.delete(path))
+  deletingPaths.value = next
+}
+
+async function executeDeleteFiles(files: FileItem[]) {
+  if (files.length === 0) {
+    ElMessage.warning('请先选择要删除的文件或文件夹')
+    return
+  }
+
+  try {
+    await confirmDeleteFiles(files)
+  } catch (error) {
+    return
+  }
+
+  const paths = files.map(file => file.path)
+  const isBatch = files.length > 1
+  markDeleting(paths)
+  if (isBatch) {
+    batchDeleting.value = true
+  }
+
+  try {
+    const result = await deleteFiles(paths)
+    if (result.success) {
+      ElMessage.success(`已删除 ${result.deleted_count} 项`)
+      selectedFiles.value = []
+      await loadFiles(currentDir.value)
+    } else {
+      ElMessage.error(result.error || '删除失败')
+      if (result.deleted_count > 0) {
+        selectedFiles.value = []
+        await loadFiles(currentDir.value)
+      }
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '删除失败')
+    console.error('删除云盘文件失败:', error)
+  } finally {
+    unmarkDeleting(paths)
+    if (isBatch) {
+      batchDeleting.value = false
+    }
+  }
+}
+
+async function handleDeleteSingle(file: FileItem) {
+  await executeDeleteFiles([file])
+}
+
+async function handleBatchDelete() {
+  await executeDeleteFiles([...selectedFiles.value])
 }
 
 // 下载文件
@@ -931,7 +1047,7 @@ function handleShareDirectDownloadSuccess(taskId: string) {
 
 <script lang="ts">
 // 图标导入
-export {Folder, Document, Refresh, HomeFilled, ArrowDown, FolderAdd, Download, Share, Loading, Link, MoreFilled} from '@element-plus/icons-vue'
+export {Folder, Document, Refresh, HomeFilled, ArrowDown, FolderAdd, Download, Share, Loading, Link, MoreFilled, Delete} from '@element-plus/icons-vue'
 </script>
 
 <style scoped lang="scss">
