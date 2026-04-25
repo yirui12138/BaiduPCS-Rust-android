@@ -207,6 +207,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--android-report", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument(
+        "--include-web-runtime",
+        action="store_true",
+        help="Include frontend npm runtime packages when the APK still ships the web UI assets.",
+    )
     return parser.parse_args()
 
 
@@ -632,7 +637,7 @@ def main() -> int:
     repo_root = Path(args.repo_root).resolve()
     android_report = Path(args.android_report).resolve()
     build_root = Path(args.out_dir).resolve()
-    open_source_root = build_root / "www" / "open-source"
+    open_source_root = build_root / "open-source"
 
     if open_source_root.exists():
         shutil.rmtree(open_source_root)
@@ -651,36 +656,37 @@ def main() -> int:
     entries: list[PackageEntry] = []
     errors: list[str] = []
 
-    # Web packages
-    for package in frontend_runtime_packages(repo_root):
-        package_dir = Path(package["package_dir"])
-        license_expression = str(package["license_expression"])
-        license_parts = license_files_from_directory(package_dir)
-        notice_parts = notice_files_from_directory(package_dir)
+    # Web packages are no longer part of the Android artifact after the native UI migration.
+    if args.include_web_runtime:
+        for package in frontend_runtime_packages(repo_root):
+            package_dir = Path(package["package_dir"])
+            license_expression = str(package["license_expression"])
+            license_parts = license_files_from_directory(package_dir)
+            notice_parts = notice_files_from_directory(package_dir)
 
-        if license_parts:
-            license_text = join_named_texts(license_parts)
-            cache_simple_license_texts(license_cache, license_expression, license_text)
-        else:
-            license_text = build_license_text_from_cache(license_expression, license_cache)
+            if license_parts:
+                license_text = join_named_texts(license_parts)
+                cache_simple_license_texts(license_cache, license_expression, license_text)
+            else:
+                license_text = build_license_text_from_cache(license_expression, license_cache)
 
-        if not license_text:
-            errors.append(f"web {package['name']}@{package['version']}: missing license text")
-            continue
+            if not license_text:
+                errors.append(f"web {package['name']}@{package['version']}: missing license text")
+                continue
 
-        notice_text_value = join_named_texts(notice_parts) if notice_parts else None
-        entries.append(
-            copy_bundle(
-                open_source_root,
-                "web",
-                str(package["name"]),
-                str(package["version"]),
-                license_expression,
-                license_text,
-                notice_text_value,
-                str(package.get("homepage") or "") or None,
+            notice_text_value = join_named_texts(notice_parts) if notice_parts else None
+            entries.append(
+                copy_bundle(
+                    open_source_root,
+                    "web",
+                    str(package["name"]),
+                    str(package["version"]),
+                    license_expression,
+                    license_text,
+                    notice_text_value,
+                    str(package.get("homepage") or "") or None,
+                )
             )
-        )
 
     # Rust packages
     registry_roots = locate_cargo_registry_roots(repo_root)

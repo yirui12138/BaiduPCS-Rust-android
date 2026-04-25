@@ -12,7 +12,7 @@ use reqwest::Client;
 use std::{ops::Range, path::Path};
 use tokio::{
     fs::File,
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
 };
 use tracing::{debug, info, warn};
 
@@ -123,11 +123,16 @@ impl Chunk {
             .await
             .context("文件定位失败")?;
 
+        // Batch small network frames into larger disk writes. This is especially important on
+        // Android public storage where many tiny random writes are routed through scoped-storage
+        // layers and can throttle download throughput.
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+
         // 3. 流式读取并写入文件，批量更新进度（减少锁竞争）
         let mut stream = resp.bytes_stream();
         let mut total_bytes_downloaded = 0u64;
         let mut pending_progress = 0u64; // 累积的待更新字节数
-        const PROGRESS_UPDATE_THRESHOLD: u64 = 256 * 1024; // 每256KB更新一次进度（减少锁竞争）
+        const PROGRESS_UPDATE_THRESHOLD: u64 = 2 * 1024 * 1024; // 每2MB更新一次进度（减少锁竞争）
         // 🔥 读取超时：防止CDN连接挂起导致分片线程永久卡死
         // 当服务端返回headers后数据流停止时，reqwest的全局timeout不会生效，
         // 需要对每次stream.next()单独设置超时
@@ -157,7 +162,7 @@ impl Chunk {
             let chunk_len = chunk_data.len() as u64;
 
             // 写入文件
-            file.write_all(&chunk_data).await.context("写入文件失败")?;
+            writer.write_all(&chunk_data).await.context("写入文件失败")?;
 
             total_bytes_downloaded += chunk_len;
             pending_progress += chunk_len;
@@ -176,8 +181,9 @@ impl Chunk {
             progress_callback(pending_progress);
         }
 
-        // 4. 刷新文件缓冲
-        file.flush().await.context("刷新文件缓冲失败")?;
+        // Flush the in-memory writer buffer only. Avoid per-chunk filesystem sync; explicit
+        // sync-style flushing is very expensive on Android public storage and hurts throughput.
+        writer.flush().await.context("刷新文件缓冲失败")?;
 
         self.completed = true;
         debug!(

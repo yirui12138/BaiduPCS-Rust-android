@@ -145,7 +145,7 @@ impl PathGuard {
         let path_buf = PathBuf::from(path);
 
         // 对于 Windows，仅处理裸驱动器根目录（"C:" 或 "C:\" / "C:/"）。
-        // drive-relative 路径（如 "C:Windows"）以及完整绝对路径（"C:\Example\foo"）
+        // drive-relative 路径（如 "C:Windows"）以及完整绝对路径（"C:\Users\foo"）
         // 必须走下方的 canonicalize() 流程，以保证返回规范化绝对路径。
         #[cfg(target_os = "windows")]
         {

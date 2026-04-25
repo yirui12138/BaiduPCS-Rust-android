@@ -76,12 +76,15 @@ pub struct AppConfig {
 pub struct MobileConfig {
     #[serde(default = "default_true")]
     pub clipboard_share_detection_enabled: bool,
+    #[serde(default = "default_true")]
+    pub vpn_warning_enabled: bool,
 }
 
 impl Default for MobileConfig {
     fn default() -> Self {
         Self {
             clipboard_share_detection_enabled: true,
+            vpn_warning_enabled: true,
         }
     }
 }
@@ -1021,19 +1024,17 @@ impl DownloadConfig {
         const KB: u64 = 1024;
         const MB: u64 = 1024 * KB;
 
-        // 根据文件大小计算基础分片大小
-        let base_chunk_size = if file_size_bytes < 5 * MB {
-            256 * KB // < 5MB → 256KB
-        } else if file_size_bytes < 10 * MB {
-            512 * KB // 5-10MB → 512KB
-        } else if file_size_bytes < 50 * MB {
-            1 * MB // 10-50MB → 1MB
+        // Android public storage has noticeable overhead for many tiny random writes. Keep
+        // small files responsive, but move medium/large files to larger chunks so each download
+        // spends less time opening ranges, updating progress, and flushing buffers.
+        let base_chunk_size = if file_size_bytes < 8 * MB {
+            1 * MB
+        } else if file_size_bytes < 32 * MB {
+            2 * MB
         } else if file_size_bytes < 100 * MB {
-            2 * MB // 50-100MB → 2MB
-        } else if file_size_bytes < 500 * MB {
-            4 * MB // 100-500MB → 4MB
+            4 * MB
         } else {
-            5 * MB // >= 500MB → 5MB（百度限制）
+            5 * MB // 百度限制
         };
 
         // 根据 VIP 等级限制最大分片大小

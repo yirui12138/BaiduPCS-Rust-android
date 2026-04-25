@@ -12,6 +12,10 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+#[cfg(not(target_os = "android"))]
+use axum::http::header::{CACHE_CONTROL, HeaderValue};
+#[cfg(target_os = "android")]
+use axum::http::StatusCode;
 use baidu_netdisk_rust::{
     config::LogConfig, logging, server::handlers, server::websocket,
     web_auth::{self, WebAuthState},
@@ -20,12 +24,17 @@ use baidu_netdisk_rust::{
 };
 use serde::Serialize;
 use std::future::Future;
+#[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceBuilder;
+#[cfg(not(target_os = "android"))]
+use tower_http::{
+    set_header::SetResponseHeaderLayer,
+    services::{ServeDir, ServeFile},
+};
 use tower_http::{
     cors::{Any, CorsLayer},
-    services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
 use tracing::info;
@@ -41,6 +50,7 @@ use tracing::info;
 /// 7. ./dist - 备选路径（手动部署）
 /// 8. {exe_dir}/frontend/dist - 相对于可执行文件的路径
 /// 9. {exe_dir}/frontend - 相对于可执行文件的 GitHub 打包路径
+#[cfg(not(target_os = "android"))]
 fn detect_frontend_dir() -> PathBuf {
     let mut candidates = vec![
         // 1. 开发环境标准路径
@@ -471,12 +481,19 @@ where
         .with_state(web_auth_state.clone());
 
     // 自动检测前端资源目录
+    #[cfg(not(target_os = "android"))]
     let frontend_dir = detect_frontend_dir();
+    #[cfg(not(target_os = "android"))]
     let index_html_path = frontend_dir.join("index.html");
 
     // 静态文件服务（前端资源）
-    let static_service =
-        ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(&index_html_path));
+    #[cfg(not(target_os = "android"))]
+    let static_service = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::if_not_present(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        ))
+        .service(ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(&index_html_path)));
 
     // 健康检查响应结构
     #[derive(Serialize)]
@@ -501,7 +518,15 @@ where
     let app = Router::new()
         .nest("/api/v1", api_routes)
         .nest("/api/v1/web-auth", web_auth_routes)
-        .route("/health", get(health_check))
+        .route("/health", get(health_check));
+
+    #[cfg(target_os = "android")]
+    let app = app
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware);
+
+    #[cfg(not(target_os = "android"))]
+    let app = app
         .fallback_service(static_service)
         .layer(middleware);
 

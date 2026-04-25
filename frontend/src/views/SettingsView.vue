@@ -219,7 +219,7 @@ See the repository LICENSE and NOTICE files for details.
                     <div class="form-tip">
                       <div>文件下载的保存目录，必须使用绝对路径</div>
                       <div style="margin-top: 4px;">
-                        Windows 示例: <code>D:\Downloads</code> 或 <code>C:\Example\Downloads</code><br/>
+                        Windows 示例: <code>D:\Downloads</code> 或 <code>C:\Users\YourName\Downloads</code><br/>
                         Linux/Docker 示例: <code>/app/downloads</code> 或 <code>/home/user/downloads</code>
                       </div>
                     </div>

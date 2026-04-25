@@ -35,11 +35,12 @@ use tracing::{debug, error, info, warn};
 /// 最大并发分片数
 pub fn calculate_task_max_chunks(file_size: u64) -> usize {
     match file_size {
-        0..=10_000_000 => 1,                 // <10MB: 单线程最好
-        10_000_001..=100_000_000 => 3,       // 10MB ~ 100MB: 稍微并发
-        100_000_001..=1_000_000_000 => 6,    // 100MB ~ 1GB: 并发6个
-        1_000_000_001..=5_000_000_000 => 10, // 1GB ~ 5GB: 10线程
-        _ => 15,                             // >5GB: 15线程
+        0..=8_000_000 => 1,                  // <8MB: 单线程避免调度开销
+        8_000_001..=32_000_000 => 3,         // 8MB ~ 32MB: 轻并发
+        32_000_001..=200_000_000 => 6,       // 32MB ~ 200MB: 移动端常见媒体文件
+        200_000_001..=1_000_000_000 => 10,   // 200MB ~ 1GB: 充分利用线程池
+        1_000_000_001..=5_000_000_000 => 12, // 1GB ~ 5GB: 控制发热和连接数
+        _ => 16,                             // >5GB: 大文件高并发但保留稳定余量
     }
 }
 
@@ -654,7 +655,7 @@ impl ChunkScheduler {
             // 从槽位池获取一个槽位ID
             let slot_id = slot_pool.acquire();
 
-            info!(
+            debug!(
                 "[分片线程{}] 分片 #{} 获得线程资源，开始下载",
                 slot_id, chunk_index
             );
@@ -697,7 +698,7 @@ impl ChunkScheduler {
             // 归还槽位到池中
             slot_pool.release(slot_id);
 
-            info!("[分片线程{}] 分片 #{} 释放线程资源", slot_id, chunk_index);
+            debug!("[分片线程{}] 分片 #{} 释放线程资源", slot_id, chunk_index);
 
             // 处理下载结果
             match result {

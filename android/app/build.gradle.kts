@@ -7,8 +7,11 @@
 // See the repository LICENSE and NOTICE files for details.
 
 import groovy.json.JsonOutput
+import org.gradle.api.GradleException
+import org.gradle.api.Project
 import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Sync
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 fun resolvePomPath(gradleCacheRoot: File, group: String, name: String, version: String): String? {
@@ -29,25 +32,70 @@ fun resolvePomPath(gradleCacheRoot: File, group: String, name: String, version: 
         ?.absolutePath
 }
 
+fun Project.readWindowsSmartAppControlState(): Int? {
+    if (!System.getProperty("os.name").contains("Windows", ignoreCase = true)) {
+        return null
+    }
+
+    val stdout = ByteArrayOutputStream()
+    val result = exec {
+        commandLine(
+            "cmd",
+            "/c",
+            "reg",
+            "query",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy",
+            "/v",
+            "VerifiedAndReputablePolicyState",
+        )
+        standardOutput = stdout
+        errorOutput = stdout
+        isIgnoreExitValue = true
+    }
+
+    if (result.exitValue != 0) {
+        return null
+    }
+
+    val text = stdout.toString(Charsets.UTF_8.name())
+    val raw = Regex("""VerifiedAndReputablePolicyState\s+REG_DWORD\s+([^\s]+)""")
+        .find(text)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?: return null
+
+    return raw.removePrefix("0x").toIntOrNull(16) ?: raw.toIntOrNull()
+}
+
+fun Project.runWindowsSmartAppControlProbe(repoRootDir: File): Pair<Int, String> {
+    val stdout = ByteArrayOutputStream()
+    val result = exec {
+        workingDir = repoRootDir
+        commandLine(
+            "python",
+            repoRootDir.resolve("backend/tools/rustc_host_wrapper.py").absolutePath,
+            "--probe-smart-app-control",
+        )
+        standardOutput = stdout
+        errorOutput = stdout
+        isIgnoreExitValue = true
+    }
+
+    return result.exitValue to stdout.toString(Charsets.UTF_8.name()).trim()
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
     id("org.mozilla.rust-android-gradle.rust-android")
 }
 
 val repoRootDir = rootProject.projectDir.parentFile
-val defaultAndroidRustTargetDir = rootProject.layout.buildDirectory
-    .dir("rust-target")
-    .get()
-    .asFile
-    .absolutePath
-val androidRustTargetDir = providers
-    .environmentVariable("BAIDUPCS_ANDROID_TARGET_DIR")
-    .orElse(defaultAndroidRustTargetDir)
-    .get()
 val gradleCacheRoot = File(gradle.gradleUserHomeDir, "caches/modules-2/files-2.1")
 val androidRuntimeReportFile = layout.buildDirectory.file("generated/openSource/android-runtime-deps.json")
 val openSourceAssetsDir = layout.buildDirectory.dir("generated/openSourceAssets")
+val androidCargoTargetDir = File("D:/android-build/baidupcs-cargo-target")
 
 android {
     namespace = "com.baidupcs.android"
@@ -112,22 +160,9 @@ android {
 
     sourceSets {
         getByName("main") {
-            assets.srcDir(layout.buildDirectory.dir("generated/frontendAssets"))
             assets.srcDir(openSourceAssetsDir)
             jniLibs.srcDir(layout.buildDirectory.dir("generated/rustJniLibs"))
         }
-    }
-}
-
-val syncWebAssets by tasks.registering(Sync::class) {
-    from(repoRootDir.resolve("frontend/dist")) {
-        exclude("open-source/**")
-    }
-    into(layout.buildDirectory.dir("generated/frontendAssets/www"))
-    includeEmptyDirs = false
-
-    doFirst {
-        delete(layout.buildDirectory.dir("generated/frontendAssets").get().asFile)
     }
 }
 
@@ -183,8 +218,6 @@ val generateOpenSourceAssets by tasks.registering {
     inputs.file(repoRootDir.resolve("NOTICE.txt"))
     inputs.file(repoRootDir.resolve("backend/Cargo.toml"))
     inputs.file(repoRootDir.resolve("backend/Cargo.lock"))
-    inputs.file(repoRootDir.resolve("frontend/package.json"))
-    inputs.file(repoRootDir.resolve("frontend/package-lock.json"))
     outputs.dir(openSourceAssetsDir)
 
     doLast {
@@ -213,10 +246,10 @@ val generateOpenSourceAssets by tasks.registering {
 val syncRustJniLibs by tasks.registering(Sync::class) {
     dependsOn("cargoBuild")
 
-    from("$androidRustTargetDir/aarch64-linux-android/release/libbaidu_netdisk_rust.so") {
+    from(androidCargoTargetDir.resolve("aarch64-linux-android/release/libbaidu_netdisk_rust.so")) {
         into("arm64-v8a")
     }
-    from("$androidRustTargetDir/x86_64-linux-android/release/libbaidu_netdisk_rust.so") {
+    from(androidCargoTargetDir.resolve("x86_64-linux-android/release/libbaidu_netdisk_rust.so")) {
         into("x86_64")
     }
 
@@ -248,14 +281,59 @@ val patchLinkerWrapper by tasks.registering {
     }
 }
 
+val verifyWindowsRustBuildPolicy by tasks.registering {
+    group = "verification"
+    description = "Fails early only when Smart App Control is confirmed to block Cargo build scripts."
+
+    doLast {
+        val state = project.readWindowsSmartAppControlState() ?: return@doLast
+        if (state == 1) {
+            val (probeExit, probeOutput) = project.runWindowsSmartAppControlProbe(repoRootDir)
+            if (probeExit == 2) {
+                throw GradleException(
+                    """
+                    Windows Smart App Control is currently enforcing Verified and Reputable signing,
+                    and the Cargo build-script probe was blocked on this machine.
+
+                    Effective ways to unblock:
+                    1. Turn off Smart App Control in Windows Security and reboot.
+                       Note: Windows may require a reinstall/reset to turn it back on later.
+                    2. Build on another machine / VM / WSL environment where Smart App Control does not block
+                       local Cargo build scripts.
+
+                    Probe output:
+                    ${probeOutput.ifBlank { "No probe details were captured." }}
+                    """.trimIndent(),
+                )
+            }
+
+            logger.warn(
+                "Smart App Control is ON, but the Cargo build-script probe did not reproduce a block. " +
+                    "Continuing with the Android Rust build.\n{}",
+                probeOutput.ifBlank { "No probe details were captured." },
+            )
+        }
+    }
+}
+
+patchLinkerWrapper.configure {
+    mustRunAfter(verifyWindowsRustBuildPolicy)
+}
+
+gradle.allprojects {
+    tasks.matching { it.name == "generateLinkerWrapper" }.configureEach {
+        mustRunAfter(verifyWindowsRustBuildPolicy)
+    }
+}
+
 tasks.named("preBuild").configure {
-    dependsOn(syncWebAssets)
     dependsOn(generateOpenSourceAssets)
     dependsOn(syncRustJniLibs)
 }
 
 tasks.configureEach {
     if (name.startsWith("cargoBuild")) {
+        dependsOn(verifyWindowsRustBuildPolicy)
         dependsOn(patchLinkerWrapper)
     }
 }
@@ -275,7 +353,7 @@ cargo {
     module = "../../backend"
     libname = "baidu_netdisk_rust"
     targets = listOf("arm64", "x86_64")
-    targetDirectory = androidRustTargetDir
+    targetDirectory = androidCargoTargetDir.absolutePath
     targetIncludes = arrayOf("libbaidu_netdisk_rust.so")
     extraCargoBuildArguments = listOf("--lib")
     profile = "release"
@@ -291,8 +369,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
     implementation("androidx.activity:activity-compose:1.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("androidx.webkit:webkit:1.11.0")
     implementation("com.google.android.material:material:1.12.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))

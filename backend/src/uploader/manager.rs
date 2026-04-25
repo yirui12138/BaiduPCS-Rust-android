@@ -1136,7 +1136,7 @@ impl UploadManager {
             // - 文件夹上传：上传的文件夹名及其子目录需要加密
             let encrypted_parent = if is_folder_upload && !parent.is_empty() && parent != "/" {
                 // 文件夹上传：需要加密目录结构
-                // local_path 例如：C:\Example\你好2\子目录\file.txt
+                // local_path 例如：C:\Users\xxx\你好2\子目录\file.txt
                 // 本地文件夹名（你好2）在 remote_path 中的位置就是需要开始加密的位置
                 let local_folder_name = local_path
                     .parent()

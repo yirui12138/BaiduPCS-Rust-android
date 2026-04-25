@@ -10,7 +10,6 @@ package com.baidupcs.android.core
 
 import android.content.Context
 import android.os.Environment
-import com.baidupcs.android.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -69,16 +68,8 @@ class ServerBootstrapper(
                     context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
                         ?: File(homeDir, "upload-space")
                     ).resolve("UploadSpace")
-                val frontendDir = File(homeDir, "frontend/dist")
-
                 homeDir.mkdirs()
                 uploadDir.mkdirs()
-
-                onStatus("同步前端资源")
-                FrontendAssetExtractor(context.assets).syncIfNeeded(
-                    targetDir = frontendDir,
-                    versionToken = "${BuildConfig.VERSION_NAME}-${BuildConfig.VERSION_CODE}",
-                )
 
                 val environment = ServerEnvironment(
                     baseUrl = "http://127.0.0.1:$SERVER_PORT",

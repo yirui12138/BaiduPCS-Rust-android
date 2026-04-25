@@ -133,8 +133,6 @@ fn start_server(
     }
 
     ensure_dir(&home_dir)?;
-    ensure_dir(&home_dir.join("frontend"))?;
-    ensure_dir(&home_dir.join("frontend").join("dist"))?;
     ensure_dir(&home_dir.join("logs"))?;
     ensure_dir(&home_dir.join("wal"))?;
     ensure_dir(&download_dir)?;

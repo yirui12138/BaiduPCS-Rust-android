@@ -3328,7 +3328,6 @@ impl DownloadManager {
         if let Some(task) = removed_task {
             let t = task.lock().await;
             local_path = Some(t.local_path.clone());
-            status_completed = Some(t.status == TaskStatus::Completed);
             info!("删除下载任务（内存中）: {}", task_id);
             drop(t);
         } else {
@@ -3369,11 +3368,7 @@ impl DownloadManager {
         // 决定是否删除本地文件
         // 1. 对于未完成的任务（包括无法确认状态的情况），自动删除临时文件
         // 2. 对于已完成的任务，根据 delete_file 参数决定
-        let should_delete = match status_completed {
-            Some(true) => delete_file,
-            Some(false) => true,
-            None => delete_file,
-        };
+        let should_delete = delete_file;
 
         if let Some(path) = local_path {
             if should_delete && path.exists() {
@@ -3504,7 +3499,6 @@ impl DownloadManager {
         // 移除任务
         let removed_task = self.tasks.write().await.remove(task_id);
         let mut local_path = None;
-        let mut status_completed = None;
 
         if was_active && removed_task.is_some() {
             self.dec_active();
@@ -3513,16 +3507,11 @@ impl DownloadManager {
         if let Some(task) = removed_task {
             let t = task.lock().await;
             local_path = Some(t.local_path.clone());
-            status_completed = Some(t.status == TaskStatus::Completed);
             drop(t);
         }
 
         // 决定是否删除本地文件
-        let should_delete = match status_completed {
-            Some(true) => delete_file,
-            Some(false) => true,
-            None => delete_file,
-        };
+        let should_delete = delete_file;
 
         if let Some(path) = local_path {
             if should_delete && path.exists() {

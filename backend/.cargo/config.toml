@@ -1,4 +1,17 @@
 [build]
 rustc-wrapper = "tools/rustc-host-wrapper.cmd"
+target-dir = "D:/android-build/baidupcs-cargo-target"
 
-# Set CARGO_TARGET_DIR externally when a custom build output directory is needed.
+[target.aarch64-linux-android]
+linker = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android26-clang.cmd"
+
+[target.x86_64-linux-android]
+linker = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android26-clang.cmd"
+
+[env]
+CC_aarch64_linux_android = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android26-clang.cmd"
+CXX_aarch64_linux_android = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android26-clang++.cmd"
+CC_x86_64_linux_android = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android26-clang.cmd"
+CXX_x86_64_linux_android = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android26-clang++.cmd"
+AR_aarch64_linux_android = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+AR_x86_64_linux_android = "C:/Users/zmf20/AppData/Local/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
